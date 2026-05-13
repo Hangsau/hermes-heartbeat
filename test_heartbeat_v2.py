@@ -15,7 +15,7 @@ import pytest
 # Add scripts dir to path for heartbeat_v2 import
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from heartbeat_v2 import (
+from heartbeat import (
     HeartbeatSnapshot,
     _is_daemon_process,
     _is_on_cooldown,
@@ -148,7 +148,7 @@ class TestScoreActions:
 
     def test_baseline_all_five(self):
         scores = score_actions(_snap(), [])
-        assert sorted(scores.keys()) == ["CONNECT", "EVOLVE", "REPORT", "REST", "WORK"]
+        assert sorted(scores.keys()) == ["CONNECT", "EVOLVE", "EXPLORE", "REPORT", "REST", "WORK"]
         assert all(s >= 5.0 for s in scores.values())
 
     def test_pending_work_boosts_work(self):
@@ -339,19 +339,19 @@ class TestActionReport:
 class TestActionWork:
     """Housekeeping: cache clean, session archive, git push."""
 
-    @patch("heartbeat_v2._safe_shell", return_value=(True, ""))
+    @patch("heartbeat.actions._safe_shell", return_value=(True, ""))
     def test_returns_tuple(self, _mock):
         result, steps, errors = action_work(_snap(), dry_run=False)
         assert isinstance(result, str)
         assert isinstance(steps, list)
         assert isinstance(errors, list)
 
-    @patch("heartbeat_v2._safe_shell", return_value=(True, ""))
+    @patch("heartbeat.actions._safe_shell", return_value=(True, ""))
     def test_result_starts_with_work(self, _mock):
         result, *_ = action_work(_snap(), dry_run=False)
         assert result.startswith("WORK:")
 
-    @patch("heartbeat_v2._safe_shell", return_value=(True, ""))
+    @patch("heartbeat.actions._safe_shell", return_value=(True, ""))
     def test_dry_run_produces_steps(self, _mock):
         result, steps, errors = action_work(_snap(), dry_run=True)
         assert isinstance(steps, list)
@@ -365,29 +365,29 @@ class TestActionWork:
 class TestActionEvolve:
     """Self-check: pytest canary, cron error scan, pacman update check."""
 
-    @patch("heartbeat_v2._scan_cron_errors", return_value=[])
-    @patch("heartbeat_v2._safe_shell", return_value=(True, ""))
+    @patch("heartbeat.actions._scan_cron_errors", return_value=[])
+    @patch("heartbeat.actions._safe_shell", return_value=(True, ""))
     def test_returns_tuple(self, _shell, _cron):
         result, steps, errors = action_evolve(_snap(), dry_run=False)
         assert isinstance(result, str)
         assert isinstance(steps, list)
         assert isinstance(errors, list)
 
-    @patch("heartbeat_v2._scan_cron_errors", return_value=[])
-    @patch("heartbeat_v2._safe_shell", return_value=(True, ""))
+    @patch("heartbeat.actions._scan_cron_errors", return_value=[])
+    @patch("heartbeat.actions._safe_shell", return_value=(True, ""))
     def test_result_starts_with_evolve(self, _shell, _cron):
         result, *_ = action_evolve(_snap(), dry_run=False)
         assert result.startswith("EVOLVE:")
 
-    @patch("heartbeat_v2._scan_cron_errors", return_value=[])
-    @patch("heartbeat_v2._safe_shell", return_value=(True, ""))
+    @patch("heartbeat.actions._scan_cron_errors", return_value=[])
+    @patch("heartbeat.actions._safe_shell", return_value=(True, ""))
     def test_dry_run_produces_steps(self, _shell, _cron):
         result, steps, errors = action_evolve(_snap(), dry_run=True)
         assert isinstance(steps, list)
         assert len(steps) > 0
 
-    @patch("heartbeat_v2._scan_cron_errors", return_value=[])
-    @patch("heartbeat_v2._safe_shell", return_value=(True, ""))
+    @patch("heartbeat.actions._scan_cron_errors", return_value=[])
+    @patch("heartbeat.actions._safe_shell", return_value=(True, ""))
     def test_cron_scan_step_present(self, _shell, _cron):
         result, steps, errors = action_evolve(_snap(), dry_run=False)
         ops = [s.get("op") for s in steps if s.get("op")]
@@ -401,8 +401,8 @@ class TestActionEvolve:
 class TestExecuteAction:
     """Action dispatch routing."""
 
-    @patch("heartbeat_v2._scan_cron_errors", return_value=[])
-    @patch("heartbeat_v2._safe_shell", return_value=(True, ""))
+    @patch("heartbeat.actions._scan_cron_errors", return_value=[])
+    @patch("heartbeat.actions._safe_shell", return_value=(True, ""))
     def test_known_action_routes(self, _shell, _cron):
         for action in ["WORK", "REST", "EVOLVE", "CONNECT", "REPORT"]:
             result, steps, errors = execute_action(action, _snap(), dry_run=True)
@@ -416,8 +416,8 @@ class TestExecuteAction:
         assert isinstance(steps, list)
         assert isinstance(errors, list)
 
-    @patch("heartbeat_v2._scan_cron_errors", return_value=[])
-    @patch("heartbeat_v2._safe_shell", return_value=(True, ""))
+    @patch("heartbeat.actions._scan_cron_errors", return_value=[])
+    @patch("heartbeat.actions._safe_shell", return_value=(True, ""))
     def test_result_is_tuple(self, _shell, _cron):
         result = execute_action("WORK", _snap(), dry_run=True)
         assert isinstance(result, tuple)
@@ -435,7 +435,7 @@ class TestActionLogHelpers:
     def test_record_and_summarize(self, tmp_path, monkeypatch):
         """Write an entry, then summarize reads it back."""
         log_file = tmp_path / "test_log.jsonl"
-        monkeypatch.setattr("heartbeat_v2._ACTION_LOG_PATH", log_file)
+        monkeypatch.setattr("heartbeat.actions._ACTION_LOG_PATH", log_file)
 
         trigger = {"disk_pct": 50.0, "cron_count": 3}
         steps = [{"op": "test_op", "result": "ok"}]
@@ -452,13 +452,13 @@ class TestActionLogHelpers:
     def test_summarize_empty(self, tmp_path, monkeypatch):
         """Empty log file should return empty list."""
         log_file = tmp_path / "empty.jsonl"
-        monkeypatch.setattr("heartbeat_v2._ACTION_LOG_PATH", log_file)
+        monkeypatch.setattr("heartbeat.actions._ACTION_LOG_PATH", log_file)
         entries = _summarize_today()
         assert entries == []
 
     def test_summarize_no_file(self, tmp_path, monkeypatch):
         """Missing log file should return empty list."""
-        monkeypatch.setattr("heartbeat_v2._ACTION_LOG_PATH", tmp_path / "nonexistent.jsonl")
+        monkeypatch.setattr("heartbeat.actions._ACTION_LOG_PATH", tmp_path / "nonexistent.jsonl")
         entries = _summarize_today()
         assert entries == []
 
@@ -472,14 +472,14 @@ class TestScanCronErrors:
 
     def test_no_output_dir(self, tmp_path, monkeypatch):
         """No output dir → empty list."""
-        monkeypatch.setattr("heartbeat_v2._HERMES_HOME", tmp_path)
+        monkeypatch.setattr("heartbeat.utils._HERMES_HOME", tmp_path)
         assert _scan_cron_errors() == []
 
     def test_empty_output_dir(self, tmp_path, monkeypatch):
         """Empty output dir → empty list."""
         cron_out = tmp_path / "cron" / "output"
         cron_out.mkdir(parents=True)
-        monkeypatch.setattr("heartbeat_v2._HERMES_HOME", tmp_path)
+        monkeypatch.setattr("heartbeat.utils._HERMES_HOME", tmp_path)
         assert _scan_cron_errors() == []
 
     def test_error_in_output(self, tmp_path, monkeypatch):
@@ -489,7 +489,7 @@ class TestScanCronErrors:
         (cron_out / "output.txt").write_text(
             "FAILED: RuntimeError: HTTP 429: Too Many Requests\n"
         )
-        monkeypatch.setattr("heartbeat_v2._HERMES_HOME", tmp_path)
+        monkeypatch.setattr("heartbeat.utils._HERMES_HOME", tmp_path)
         errors = _scan_cron_errors()
         assert len(errors) == 1
         assert errors[0]["job_id"] == "abc123"
@@ -502,7 +502,7 @@ class TestScanCronErrors:
         (cron_out / "output.txt").write_text(
             "SUCCESS: all tasks completed\n"
         )
-        monkeypatch.setattr("heartbeat_v2._HERMES_HOME", tmp_path)
+        monkeypatch.setattr("heartbeat.utils._HERMES_HOME", tmp_path)
         assert _scan_cron_errors() == []
 
     def test_traceback_detected(self, tmp_path, monkeypatch):
@@ -512,7 +512,7 @@ class TestScanCronErrors:
         (cron_out / "output.txt").write_text(
             "Traceback (most recent call last):\n  File 'x.py', line 1\n"
         )
-        monkeypatch.setattr("heartbeat_v2._HERMES_HOME", tmp_path)
+        monkeypatch.setattr("heartbeat.utils._HERMES_HOME", tmp_path)
         errors = _scan_cron_errors()
         assert len(errors) == 1
         assert "err_job" == errors[0]["job_id"]
@@ -566,37 +566,37 @@ class TestProviderProbe:
 class TestActionConnectProbe:
     """CONNECT action with failed platforms triggers probe steps."""
 
-    @patch("heartbeat_v2._probe_provider", return_value=(False, "timeout"))
+    @patch("heartbeat.actions._probe_provider", return_value=(False, "timeout"))
     def test_probe_degraded_step_present(self, _mock, monkeypatch, tmp_path):
-        monkeypatch.setattr("heartbeat_v2._HERMES_HOME", tmp_path)
+        monkeypatch.setattr("heartbeat.utils._HERMES_HOME", tmp_path)
         snap = _snap(failed_platforms=["openrouter"])
         _, steps, _ = action_connect(snap, dry_run=False)
         probes = [s for s in steps if s.get("op", "").startswith("probe_")]
         assert len(probes) == 1
         assert probes[0]["op"] == "probe_degraded"
 
-    @patch("heartbeat_v2._probe_provider", return_value=(True, "HTTP 200"))
+    @patch("heartbeat.actions._probe_provider", return_value=(True, "HTTP 200"))
     def test_probe_recovery_step_present(self, _mock, monkeypatch, tmp_path):
-        monkeypatch.setattr("heartbeat_v2._HERMES_HOME", tmp_path)
+        monkeypatch.setattr("heartbeat.utils._HERMES_HOME", tmp_path)
         snap = _snap(failed_platforms=["openrouter"])
         _, steps, _ = action_connect(snap, dry_run=False)
         probes = [s for s in steps if s.get("op", "").startswith("probe_")]
         assert len(probes) == 1
         assert probes[0]["op"] == "probe_recovery"
 
-    @patch("heartbeat_v2._probe_provider", return_value=(True, "HTTP 401"))
+    @patch("heartbeat.actions._probe_provider", return_value=(True, "HTTP 401"))
     def test_401_counts_as_alive(self, _mock, monkeypatch, tmp_path):
         """Even 401 means the service is responding."""
-        monkeypatch.setattr("heartbeat_v2._HERMES_HOME", tmp_path)
+        monkeypatch.setattr("heartbeat.utils._HERMES_HOME", tmp_path)
         snap = _snap(failed_platforms=["gemini"])
         _, steps, _ = action_connect(snap, dry_run=False)
         probes = [s for s in steps if s.get("op", "").startswith("probe_")]
         assert probes[0]["op"] == "probe_recovery"
         assert "401" in probes[0]["result"]
 
-    @patch("heartbeat_v2._probe_provider", return_value=(False, "connection refused"))
+    @patch("heartbeat.actions._probe_provider", return_value=(False, "connection refused"))
     def test_connection_refused_stays_degraded(self, _mock, monkeypatch, tmp_path):
-        monkeypatch.setattr("heartbeat_v2._HERMES_HOME", tmp_path)
+        monkeypatch.setattr("heartbeat.utils._HERMES_HOME", tmp_path)
         snap = _snap(failed_platforms=["openrouter"])
         _, steps, _ = action_connect(snap, dry_run=False)
         probes = [s for s in steps if s.get("op", "").startswith("probe_")]
@@ -615,7 +615,7 @@ class TestCoverageTracking:
 
     def test_track_saves_and_returns_delta(self, tmp_path, monkeypatch):
         cov_path = tmp_path / "coverage.json"
-        monkeypatch.setattr("heartbeat_v2._COVERAGE_PATH", cov_path)
+        monkeypatch.setattr("heartbeat.utils._COVERAGE_PATH", cov_path)
         result = _track_coverage(55)
         assert result["coverage_pct"] == 55
         assert result["delta"] is None  # first run
@@ -623,7 +623,7 @@ class TestCoverageTracking:
 
     def test_track_delta_from_previous(self, tmp_path, monkeypatch):
         cov_path = tmp_path / "coverage.json"
-        monkeypatch.setattr("heartbeat_v2._COVERAGE_PATH", cov_path)
+        monkeypatch.setattr("heartbeat.utils._COVERAGE_PATH", cov_path)
         cov_path.write_text('{"coverage_pct": 50, "ts": "old"}')
         result = _track_coverage(55)
         assert result["coverage_pct"] == 55
