@@ -18,7 +18,8 @@ import sys
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Pattern
+import re
 
 # ── Paths ──────────────────────────────────────────────────────────
 _HERMES_HOME = Path.home() / ".hermes"
@@ -473,6 +474,10 @@ _SESSION_ARCHIVE_IDLE_HOURS = 168  # 7 days
 _SESSION_ARCHIVE_MIN_IDLE_MINUTES = 60
 _CACHE_CLEAN_MTIME_DAYS = 7
 
+# Coverage tracking
+_COVERAGE_PATH = _HERMES_HOME / "heartbeat_coverage.json"
+_COVERAGE_RE = re.compile(r"TOTAL\s+\d+\s+\d+\s+(\d+)%")
+
 def _cache_clean_threshold(disk_pct: float | None) -> int:
     """Return cache mtime threshold in days, based on disk pressure.
     Higher pressure → more aggressive cleanup (lower threshold)."""
@@ -509,6 +514,36 @@ def _probe_provider(provider: str) -> tuple[bool, str]:
         code = out.strip()
         return True, f"HTTP {code}"
     return False, out[:80] if out else "no output"
+
+
+def _parse_coverage_pct(cov_output: str) -> int | None:
+    """Extract TOTAL coverage percentage from pytest --cov output."""
+    m = _COVERAGE_RE.search(cov_output)
+    if m:
+        return int(m.group(1))
+    return None
+
+
+def _track_coverage(pct: int) -> dict:
+    """Compare current coverage with last, save new baseline. Returns delta info."""
+    prev: dict = {}
+    if _COVERAGE_PATH.exists():
+        try:
+            prev = json.loads(_COVERAGE_PATH.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+    prev_pct = prev.get("coverage_pct")
+    delta = pct - prev_pct if prev_pct is not None else None
+
+    baseline = {
+        "coverage_pct": pct,
+        "ts": datetime.now(timezone.utc).isoformat(),
+        "prev_pct": prev_pct,
+        "delta": delta,
+    }
+    _safe_json_write(_COVERAGE_PATH, baseline)
+    return baseline
+
 
 _GIT_REPOS = [
     Path.home() / "managed-agents-research",
@@ -836,19 +871,25 @@ def action_evolve(snap: HeartbeatSnapshot, dry_run: bool) -> tuple[str, list[dic
     steps: list[dict] = []
     errors: list[str] = []
 
-    # 1. Pytest canary
+    # 1. Pytest canary + coverage
     test_path = _HERMES_HOME / "scripts" / "test_heartbeat_v2.py"
     if test_path.exists():
         if dry_run:
             steps.append({"op": "pytest_canary", "result": "dry-run skipped"})
         else:
             ok, out = _safe_shell(
-                ["python3", "-m", "pytest", str(test_path), "-v", "--tb=short"],
-                timeout=60,
+                ["python3", "-m", "pytest", str(test_path), "--cov=heartbeat_v2", "--cov-report=term", "--tb=short", "-q"],
+                timeout=90,
                 workdir=str(_HERMES_HOME / "scripts"),
             )
             if ok:
-                steps.append({"op": "pytest_canary", "result": "PASS", "ok": True})
+                pct = _parse_coverage_pct(out)
+                if pct is not None:
+                    cov = _track_coverage(pct)
+                    delta_str = f" {cov['delta']:+d}%" if cov["delta"] is not None else ""
+                    steps.append({"op": "pytest_canary", "result": "PASS", "coverage": pct, "delta": cov.get("delta"), "ok": True})
+                else:
+                    steps.append({"op": "pytest_canary", "result": "PASS (cov parse failed)", "ok": True})
             else:
                 errors.append("pytest canary failed")
                 steps.append({"op": "pytest_canary", "result": out[-200:], "ok": False})

@@ -22,6 +22,8 @@ from heartbeat_v2 import (
     _cache_clean_threshold,
     _CACHE_CLEAN_MTIME_DAYS,
     _probe_provider,
+    _parse_coverage_pct,
+    _track_coverage,
     action_connect,
     action_report,
     action_evolve,
@@ -599,3 +601,31 @@ class TestActionConnectProbe:
         _, steps, _ = action_connect(snap, dry_run=False)
         probes = [s for s in steps if s.get("op", "").startswith("probe_")]
         assert probes[0]["op"] == "probe_degraded"
+
+
+class TestCoverageTracking:
+    """Parse and track pytest coverage percentage."""
+
+    def test_parse_coverage_from_output(self):
+        out = "Name              Stmts   Miss  Cover\n-------------------------------------\nheartbeat_v2.py     727    373    49%\n-------------------------------------\nTOTAL               727    373    49%"
+        assert _parse_coverage_pct(out) == 49
+
+    def test_parse_no_total_line_returns_none(self):
+        assert _parse_coverage_pct("no coverage here") is None
+
+    def test_track_saves_and_returns_delta(self, tmp_path, monkeypatch):
+        cov_path = tmp_path / "coverage.json"
+        monkeypatch.setattr("heartbeat_v2._COVERAGE_PATH", cov_path)
+        result = _track_coverage(55)
+        assert result["coverage_pct"] == 55
+        assert result["delta"] is None  # first run
+        assert cov_path.exists()
+
+    def test_track_delta_from_previous(self, tmp_path, monkeypatch):
+        cov_path = tmp_path / "coverage.json"
+        monkeypatch.setattr("heartbeat_v2._COVERAGE_PATH", cov_path)
+        cov_path.write_text('{"coverage_pct": 50, "ts": "old"}')
+        result = _track_coverage(55)
+        assert result["coverage_pct"] == 55
+        assert result["delta"] == 5
+        assert result["prev_pct"] == 50
