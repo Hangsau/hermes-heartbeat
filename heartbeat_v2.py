@@ -16,7 +16,7 @@ import shutil
 import subprocess
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -464,6 +464,10 @@ def record_decision(action: str, reason: str, scores: dict[str, float]) -> None:
 
 # ── Action log ──────────────────────────────────────────────────────
 _ACTION_LOG_PATH = _HERMES_HOME / "heartbeat_action_log.jsonl"
+_ACTION_LOG_ARCHIVE_PATH = _HERMES_HOME / "heartbeat_action_log_archive.jsonl"
+_PATTERNS_PATH = _HERMES_HOME / "heartbeat_patterns.json"
+_LEARNING_SCRIPT = _HERMES_HOME / "scripts" / "heartbeat_learning.py"
+_ACTION_LOG_ROTATE_DAYS = 30
 _SESSION_ARCHIVE_DIR = _HERMES_HOME / "sessions" / "archive"
 _SESSION_ARCHIVE_IDLE_HOURS = 168  # 7 days
 _SESSION_ARCHIVE_MIN_IDLE_MINUTES = 60
@@ -492,6 +496,57 @@ def _record_action_log(
             f.write(json.dumps(rec, ensure_ascii=False) + "\n")
     except Exception:
         pass
+
+
+def _rotate_action_log() -> tuple[int, int]:
+    """Archive entries older than _ACTION_LOG_ROTATE_DAYS to the archive file.
+    Returns (archived_count, kept_count). Called from main() after recording."""
+    if not _ACTION_LOG_PATH.exists():
+        return 0, 0
+    cutoff_ts = datetime.now(timezone.utc)
+    cutoff = (cutoff_ts.replace(hour=0, minute=0, second=0, microsecond=0)
+              - timedelta(days=_ACTION_LOG_ROTATE_DAYS)).isoformat()
+    kept: list[str] = []
+    archived: list[str] = []
+    try:
+        with open(_ACTION_LOG_PATH, "r", encoding="utf-8") as f:
+            for line in f:
+                line_s = line.strip()
+                if not line_s:
+                    continue
+                try:
+                    rec = json.loads(line_s)
+                    ts = rec.get("ts", "")
+                except json.JSONDecodeError:
+                    kept.append(line_s)
+                    continue
+                if ts and ts < cutoff:
+                    archived.append(line_s)
+                else:
+                    kept.append(line_s)
+    except Exception:
+        return 0, 0
+
+    if not archived:
+        return 0, len(kept)
+
+    # Append to archive
+    try:
+        with open(_ACTION_LOG_ARCHIVE_PATH, "a", encoding="utf-8") as f:
+            for line in archived:
+                f.write(line + "\n")
+    except Exception:
+        return 0, len(kept)
+
+    # Write back kept entries
+    try:
+        with open(_ACTION_LOG_PATH, "w", encoding="utf-8") as f:
+            for line in kept:
+                f.write(line + "\n")
+    except Exception:
+        return 0, len(kept)
+
+    return len(archived), len(kept)
 
 
 def _scan_cron_errors() -> list[dict[str, Any]]:
@@ -772,6 +827,29 @@ def action_evolve(snap: HeartbeatSnapshot, dry_run: bool) -> tuple[str, list[dic
             errors.append(f"pacman -Sy: {out[:100]}")
             steps.append({"op": "pacman_check", "result": out[:100], "ok": False})
 
+    # 4. Learning extraction: run heartbeat_learning.py if action log has data
+    if _LEARNING_SCRIPT.exists() and _ACTION_LOG_PATH.exists():
+        if dry_run:
+            steps.append({"op": "learn_extract", "result": "dry-run skipped"})
+        else:
+            ok, out = _safe_shell(
+                ["python3", str(_LEARNING_SCRIPT)],
+                timeout=30,
+                workdir=str(_HERMES_HOME / "scripts"),
+            )
+            if ok:
+                # Parse output for pattern count
+                extracted = 0
+                for line in out.splitlines():
+                    if "Extracted" in line and "new candidate patterns" in line:
+                        try:
+                            extracted = int(line.split("Extracted")[1].split()[0])
+                        except (ValueError, IndexError):
+                            pass
+                steps.append({"op": "learn_extract", "count": extracted, "result": f"extracted {extracted} patterns", "ok": True})
+            else:
+                steps.append({"op": "learn_extract", "result": "extraction skipped (not enough data)", "ok": True})
+
     result = f"EVOLVE: {len(steps)} steps" + (f", {len(errors)} errors" if errors else "")
     return result, steps, errors
 
@@ -824,6 +902,23 @@ def action_report(snap: HeartbeatSnapshot, dry_run: bool) -> tuple[str, list[dic
     lines = ["🫀 心跳今日摘要", "", "做了："] + done
     if learnings:
         lines += ["", "學到："] + learnings
+
+    # Include detected patterns (only new ones since last report)
+    if _PATTERNS_PATH.exists():
+        try:
+            patterns_data = json.loads(_PATTERNS_PATH.read_text(encoding="utf-8"))
+            pats = patterns_data.get("patterns", [])
+            if pats:
+                recent = [p for p in pats if p.get("frequency", 0) >= 2]
+                if recent:
+                    lines += ["", "📊 近期模式："]
+                    for p in recent[:5]:
+                        ptype = p.get("type", "?")
+                        freq = p.get("frequency", 0)
+                        desc = p.get("description", p.get("error", str(p)[:80]))
+                        lines.append(f"- [{ptype}] ×{freq}: {desc}")
+        except Exception:
+            pass
 
     # Build displayable steps from entries for dry-run output
     report_steps = []
@@ -901,6 +996,10 @@ def main() -> None:
         if errors:
             learnings = f"errors: {', '.join(errors[:3])}"
         _record_action_log(action, trigger, steps, outcome, errors, learnings)
+        # Rotate action log (archive entries > 30 days)
+        archived, kept = _rotate_action_log()
+        if archived:
+            print(f"Log rotation: archived {archived} entries, {kept} kept")
         print(f"Action: {action} | Result: {result}")
         if errors:
             print(f"Errors: {len(errors)}")
