@@ -5,7 +5,9 @@ Run: cd ~/.hermes/scripts && python3 -m pytest test_heartbeat_v2.py -v
 
 import sys
 import time
+import json
 from pathlib import Path
+from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
 import pytest
@@ -19,6 +21,7 @@ from heartbeat_v2 import (
     _is_on_cooldown,
     _cache_clean_threshold,
     _CACHE_CLEAN_MTIME_DAYS,
+    _probe_provider,
     action_connect,
     action_report,
     action_evolve,
@@ -540,3 +543,59 @@ class TestDynamicThreshold:
 
     def test_none_disk_returns_default(self) -> None:
         assert _cache_clean_threshold(None) == _CACHE_CLEAN_MTIME_DAYS
+
+
+class TestProviderProbe:
+    """Provider probe function — lightweight HTTP check."""
+
+    def test_unknown_provider_no_url(self):
+        alive, detail = _probe_provider("nonexistent")
+        assert not alive
+        assert "no probe URL" in detail
+
+    def test_known_provider_has_url(self):
+        for prov in ["openrouter", "anthropic", "openai", "gemini", "ollama"]:
+            alive, detail = _probe_provider(prov)
+            # Actual probe result depends on network; just check no crash
+            assert isinstance(alive, bool)
+            assert isinstance(detail, str)
+
+
+class TestActionConnectProbe:
+    """CONNECT action with failed platforms triggers probe steps."""
+
+    @patch("heartbeat_v2._probe_provider", return_value=(False, "timeout"))
+    def test_probe_degraded_step_present(self, _mock, monkeypatch, tmp_path):
+        monkeypatch.setattr("heartbeat_v2._HERMES_HOME", tmp_path)
+        snap = _snap(failed_platforms=["openrouter"])
+        _, steps, _ = action_connect(snap, dry_run=False)
+        probes = [s for s in steps if s.get("op", "").startswith("probe_")]
+        assert len(probes) == 1
+        assert probes[0]["op"] == "probe_degraded"
+
+    @patch("heartbeat_v2._probe_provider", return_value=(True, "HTTP 200"))
+    def test_probe_recovery_step_present(self, _mock, monkeypatch, tmp_path):
+        monkeypatch.setattr("heartbeat_v2._HERMES_HOME", tmp_path)
+        snap = _snap(failed_platforms=["openrouter"])
+        _, steps, _ = action_connect(snap, dry_run=False)
+        probes = [s for s in steps if s.get("op", "").startswith("probe_")]
+        assert len(probes) == 1
+        assert probes[0]["op"] == "probe_recovery"
+
+    @patch("heartbeat_v2._probe_provider", return_value=(True, "HTTP 401"))
+    def test_401_counts_as_alive(self, _mock, monkeypatch, tmp_path):
+        """Even 401 means the service is responding."""
+        monkeypatch.setattr("heartbeat_v2._HERMES_HOME", tmp_path)
+        snap = _snap(failed_platforms=["gemini"])
+        _, steps, _ = action_connect(snap, dry_run=False)
+        probes = [s for s in steps if s.get("op", "").startswith("probe_")]
+        assert probes[0]["op"] == "probe_recovery"
+        assert "401" in probes[0]["result"]
+
+    @patch("heartbeat_v2._probe_provider", return_value=(False, "connection refused"))
+    def test_connection_refused_stays_degraded(self, _mock, monkeypatch, tmp_path):
+        monkeypatch.setattr("heartbeat_v2._HERMES_HOME", tmp_path)
+        snap = _snap(failed_platforms=["openrouter"])
+        _, steps, _ = action_connect(snap, dry_run=False)
+        probes = [s for s in steps if s.get("op", "").startswith("probe_")]
+        assert probes[0]["op"] == "probe_degraded"

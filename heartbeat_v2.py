@@ -485,6 +485,31 @@ def _cache_clean_threshold(disk_pct: float | None) -> int:
     if disk_pct > 70:
         return 5
     return _CACHE_CLEAN_MTIME_DAYS
+
+# Provider probe endpoints — curl GET, any HTTP response = alive
+_PROVIDER_PROBE_URLS: dict[str, str] = {
+    "openrouter": "https://openrouter.ai/api/v1/models",
+    "anthropic": "https://api.anthropic.com/v1/messages",
+    "openai": "https://api.openai.com/v1/models",
+    "gemini": "https://generativelanguage.googleapis.com/v1beta/models",
+    "ollama": "http://localhost:11434/api/tags",
+}
+
+def _probe_provider(provider: str) -> tuple[bool, str]:
+    """Lightweight HTTP probe for a provider. Returns (alive, detail).
+    Any HTTP response (even 401/403) counts as alive — only timeout/connection error = dead."""
+    if provider not in _PROVIDER_PROBE_URLS:
+        return False, f"no probe URL for {provider}"
+    url = _PROVIDER_PROBE_URLS[provider]
+    ok, out = _safe_shell(
+        ["curl", "-s", "--max-time", "10", "-o", "/dev/null", "-w", "%{http_code}", url],
+        timeout=15,
+    )
+    if ok and out.strip():
+        code = out.strip()
+        return True, f"HTTP {code}"
+    return False, out[:80] if out else "no output"
+
 _GIT_REPOS = [
     Path.home() / "managed-agents-research",
 ]
@@ -725,7 +750,18 @@ def action_connect(snap: HeartbeatSnapshot, dry_run: bool) -> tuple[str, list[di
 
     degraded = set(snap.failed_platforms)
 
-    # Pause jobs whose mapped provider is degraded
+    # 0. Active probe: verify degraded providers are actually still down
+    recovered: list[str] = []
+    for prov in list(degraded):
+        alive, detail = _probe_provider(prov)
+        if alive:
+            recovered.append(prov)
+            degraded.discard(prov)
+            steps.append({"op": "probe_recovery", "provider": prov, "result": f"recovered ({detail})", "ok": True})
+        else:
+            steps.append({"op": "probe_degraded", "provider": prov, "result": f"still down: {detail}", "ok": False})
+
+    # 1. Pause jobs whose mapped provider is degraded
     for job in jobs:
         job_name = job.get("name", "?")
         job_model = job.get("model", "") or ""
