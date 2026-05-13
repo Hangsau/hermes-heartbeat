@@ -472,6 +472,19 @@ _SESSION_ARCHIVE_DIR = _HERMES_HOME / "sessions" / "archive"
 _SESSION_ARCHIVE_IDLE_HOURS = 168  # 7 days
 _SESSION_ARCHIVE_MIN_IDLE_MINUTES = 60
 _CACHE_CLEAN_MTIME_DAYS = 7
+
+def _cache_clean_threshold(disk_pct: float | None) -> int:
+    """Return cache mtime threshold in days, based on disk pressure.
+    Higher pressure → more aggressive cleanup (lower threshold)."""
+    if disk_pct is None:
+        return _CACHE_CLEAN_MTIME_DAYS
+    if disk_pct > 90:
+        return 1
+    if disk_pct > 80:
+        return 3
+    if disk_pct > 70:
+        return 5
+    return _CACHE_CLEAN_MTIME_DAYS
 _GIT_REPOS = [
     Path.home() / "managed-agents-research",
 ]
@@ -608,9 +621,10 @@ def action_work(snap: HeartbeatSnapshot, dry_run: bool) -> tuple[str, list[dict]
     steps: list[dict] = []
     errors: list[str] = []
 
-    # 1. Clean ~/.cache/ files older than 7 days
+    # 1. Clean ~/.cache/ files older than N days (dynamic threshold based on disk pressure)
+    days = _cache_clean_threshold(snap.disk_used_pct)
     ok, out = _safe_shell(
-        ["find", str(Path.home() / ".cache"), "-type", "f", "-mtime", f"+{_CACHE_CLEAN_MTIME_DAYS}", "-delete"],
+        ["find", str(Path.home() / ".cache"), "-type", "f", "-mtime", f"+{days}", "-delete"],
         timeout=30,
     )
     if dry_run:

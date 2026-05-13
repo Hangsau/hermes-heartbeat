@@ -17,6 +17,8 @@ from heartbeat_v2 import (
     HeartbeatSnapshot,
     _is_daemon_process,
     _is_on_cooldown,
+    _cache_clean_threshold,
+    _CACHE_CLEAN_MTIME_DAYS,
     action_connect,
     action_report,
     action_evolve,
@@ -509,3 +511,32 @@ class TestScanCronErrors:
         errors = _scan_cron_errors()
         assert len(errors) == 1
         assert "err_job" == errors[0]["job_id"]
+
+
+class TestDynamicThreshold:
+    def test_high_pressure_returns_1(self) -> None:
+        assert _cache_clean_threshold(91.0) == 1
+
+    def test_mid_high_pressure_returns_3(self) -> None:
+        assert _cache_clean_threshold(85.0) == 3
+
+    def test_mid_pressure_returns_5(self) -> None:
+        assert _cache_clean_threshold(75.0) == 5
+
+    def test_normal_disk_returns_default(self) -> None:
+        assert _cache_clean_threshold(60.0) == _CACHE_CLEAN_MTIME_DAYS
+
+    def test_edge_90(self) -> None:
+        assert _cache_clean_threshold(90.1) == 1
+        assert _cache_clean_threshold(90.0) == 3
+
+    def test_edge_80(self) -> None:
+        assert _cache_clean_threshold(80.1) == 3
+        assert _cache_clean_threshold(80.0) == 5
+
+    def test_edge_70(self) -> None:
+        assert _cache_clean_threshold(70.1) == 5
+        assert _cache_clean_threshold(70.0) == _CACHE_CLEAN_MTIME_DAYS
+
+    def test_none_disk_returns_default(self) -> None:
+        assert _cache_clean_threshold(None) == _CACHE_CLEAN_MTIME_DAYS
